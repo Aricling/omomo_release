@@ -21,7 +21,12 @@ from human_body_prior.body_model.body_model import BodyModel
 
 from manip.lafan1.utils import rotate_at_frame_w_obj 
 
-SMPLH_PATH = "./data/smpl_all_models/smplh_amass"
+import pickle
+
+from pathlib import Path
+from tqdm import tqdm
+
+SMPLH_PATH = "/home/guoling/HOIs/all_body_models/smplh_amass"
 
 def to_tensor(array, dtype=torch.float32):
     if not torch.is_tensor(array):
@@ -144,18 +149,10 @@ def merge_two_parts(verts_list, faces_list):
 class HandFootManipDataset(Dataset):
     def __init__(
         self,
-        train,
         data_root_folder,
-        window=120,
-        use_object_splits=False,
-    ):
-        self.train = train
-        
-        self.window = window
-
+    ):        
         self.use_joints24 = True 
 
-        self.use_object_splits = use_object_splits 
         self.train_objects = ["largetable", "woodchair", "plasticbox", "largebox", "smallbox", \
                     "trashcan", "monitor", "floorlamp", "clothesstand", "vacuum"] # 10 objects 
         self.test_objects = ["smalltable", "whitechair", "suitcase", "tripod", "mop"]
@@ -164,110 +161,15 @@ class HandFootManipDataset(Dataset):
 
         self.data_root_folder = data_root_folder 
 
+        # 处理train的数据
+        # self.data_dict= joblib.load(os.path.join(data_root_folder, "train_diffusion_manip_seq_joints24.p"))
+        # 处理test的数据
+        self.data_dict= joblib.load(os.path.join(data_root_folder, "test_diffusion_manip_seq_joints24.p"))
+
         self.obj_geo_root_folder = os.path.join(data_root_folder, "captured_objects")
 
-        self.bps_path = "./manip/data/bps.pt"
-
-        train_subjects = []
-        test_subjects = []
-        num_subjects = 17 
-        for s_idx in range(1, num_subjects+1):
-            if s_idx >= 16:
-                test_subjects.append("sub"+str(s_idx))
-            else:
-                train_subjects.append("sub"+str(s_idx))
-
-        dest_obj_bps_npy_folder = os.path.join(data_root_folder, "object_bps_npy_files_joints24")
-        dest_obj_bps_npy_folder_for_test = os.path.join(data_root_folder, "object_bps_npy_files_for_eval_joints24")
-      
-        if not os.path.exists(dest_obj_bps_npy_folder):
-            os.makedirs(dest_obj_bps_npy_folder)
-
-        if not os.path.exists(dest_obj_bps_npy_folder_for_test):
-            os.makedirs(dest_obj_bps_npy_folder_for_test)
-
-        if self.train:
-            self.dest_obj_bps_npy_folder = dest_obj_bps_npy_folder 
-        else:
-            self.dest_obj_bps_npy_folder = dest_obj_bps_npy_folder_for_test 
-
-        if self.train:   
-            seq_data_path = os.path.join(data_root_folder, "train_diffusion_manip_seq_joints24.p")  
-            processed_data_path = os.path.join(data_root_folder, "train_diffusion_manip_window_"+str(self.window)+"_cano_joints24.p")
-        else: 
-            seq_data_path = os.path.join(data_root_folder, "test_diffusion_manip_seq_joints24.p")
-            processed_data_path = os.path.join(data_root_folder, "test_diffusion_manip_window_"+str(self.window)+"_processed_joints24.p")
-           
-        min_max_mean_std_data_path = os.path.join(data_root_folder, "min_max_mean_std_data_window_"+str(self.window)+"_cano_joints24.p")
-        
-        self.prep_bps_data()
-
-        if os.path.exists(processed_data_path):
-            self.window_data_dict = joblib.load(processed_data_path)
-
-            # if not self.train:
-                # Mannually enable this.
-                # self.get_bps_from_window_data_dict()
-        else:
-            if os.path.exists(seq_data_path):
-                self.data_dict = joblib.load(seq_data_path)
+        self.window_data_dict = {}
             
-            self.cal_normalize_data_input()
-            joblib.dump(self.window_data_dict, processed_data_path)            
-
-        if os.path.exists(min_max_mean_std_data_path):
-            min_max_mean_std_jpos_data = joblib.load(min_max_mean_std_data_path)
-        else:
-            if self.train:
-                min_max_mean_std_jpos_data = self.extract_min_max_mean_std_from_data()
-                joblib.dump(min_max_mean_std_jpos_data, min_max_mean_std_data_path)
-           
-        self.global_jpos_min = torch.from_numpy(min_max_mean_std_jpos_data['global_jpos_min']).float().reshape(24, 3)[None]
-        self.global_jpos_max = torch.from_numpy(min_max_mean_std_jpos_data['global_jpos_max']).float().reshape(24, 3)[None]
-       
-        if self.use_object_splits:
-            self.window_data_dict = self.filter_out_object_split()
-
-        # Get train and validation statistics. 
-        if self.train:
-            print("Total number of windows for training:{0}".format(len(self.window_data_dict)))
-        else:
-            print("Total number of windows for validation:{0}".format(len(self.window_data_dict)))
-
-        # Prepare SMPLX model 
-        soma_work_base_dir = os.path.join(self.data_root_folder, 'smpl_all_models')
-        support_base_dir = soma_work_base_dir 
-        surface_model_type = "smplx"
-        # surface_model_male_fname = os.path.join(support_base_dir, surface_model_type, "male", 'model.npz')
-        # surface_model_female_fname = os.path.join(support_base_dir, surface_model_type, "female", 'model.npz')
-        surface_model_male_fname = os.path.join(support_base_dir, surface_model_type, "SMPLX_MALE.npz")
-        surface_model_female_fname = os.path.join(support_base_dir, surface_model_type, "SMPLX_FEMALE.npz")
-        dmpl_fname = None
-        num_dmpls = None 
-        num_expressions = None
-        num_betas = 16 
-
-        self.male_bm = BodyModel(bm_fname=surface_model_male_fname,
-                        num_betas=num_betas,
-                        num_expressions=num_expressions,
-                        num_dmpls=num_dmpls,
-                        dmpl_fname=dmpl_fname)
-        self.female_bm = BodyModel(bm_fname=surface_model_female_fname,
-                        num_betas=num_betas,
-                        num_expressions=num_expressions,
-                        num_dmpls=num_dmpls,
-                        dmpl_fname=dmpl_fname)
-
-        for p in self.male_bm.parameters():
-            p.requires_grad = False
-        for p in self.female_bm.parameters():
-            p.requires_grad = False 
-
-        self.male_bm = self.male_bm.cuda()
-        self.female_bm = self.female_bm.cuda()
-        
-        self.bm_dict = {'male' : self.male_bm, 'female' : self.female_bm}
-
     def filter_out_object_split(self):
         # Remove some sequences from window_data_dict such that we have some unseen objects during testing. 
         new_cnt = 0
@@ -304,6 +206,17 @@ class HandFootManipDataset(Dataset):
         transformed_obj_verts = seq_scale.unsqueeze(-1).unsqueeze(-1) * \
         seq_rot_mat.bmm(ori_obj_verts.transpose(1, 2)) + seq_trans
         transformed_obj_verts = transformed_obj_verts.transpose(1, 2) # T X Nv X 3 
+
+        # # 自己加的存储obj motion
+        # save_obj_motion_path = os.path.join(self.data_root_folder, "obj_motion.npz")
+        # object_motion={
+        #     "seq_trans": np.array(seq_trans),
+        #     "seq_rot_mat": np.array(seq_rot_mat),
+        #     "seq_scale": np.array(seq_scale),
+        #     "obj_name": obj_mesh_path.split("/")[-1].split("_cleaned_simplified")[0],
+        #     "transformed_obj_verts": np.array(transformed_obj_verts)
+        # }
+        # np.savez(save_obj_motion_path, **object_motion)
 
         return transformed_obj_verts, obj_mesh_faces  
 
@@ -397,168 +310,154 @@ class HandFootManipDataset(Dataset):
         import pdb 
         pdb.set_trace() 
 
-    def cal_normalize_data_input(self):
-        self.window_data_dict = {}
-        s_idx = 0 
-        for index in self.data_dict:
-            seq_name = self.data_dict[index]['seq_name']
+    def cal_normalize_data_input(self, index_idx):
+        
+        index = index_idx
+        s_idx = index_idx
+        seq_name = self.data_dict[index]['seq_name']
 
-            object_name = seq_name.split("_")[1]
+        object_name = seq_name.split("_")[1]
 
-            betas = self.data_dict[index]['betas'] # 1 X 16 
-            gender = self.data_dict[index]['gender']
+        betas = self.data_dict[index]['betas'] # 1 X 16 
+        gender = self.data_dict[index]['gender']
 
-            seq_root_trans = self.data_dict[index]['trans'] # T X 3 
-            seq_root_orient = self.data_dict[index]['root_orient'] # T X 3 
-            seq_pose_body = self.data_dict[index]['pose_body'].reshape(-1, 21, 3) # T X 21 X 3
+        seq_root_trans = self.data_dict[index]['trans'] # T X 3 
+        seq_root_orient = self.data_dict[index]['root_orient'] # T X 3 
+        seq_pose_body = self.data_dict[index]['pose_body'].reshape(-1, 21, 3) # T X 21 X 3
 
-            rest_human_offsets = self.data_dict[index]['rest_offsets'] # 22 X 3/24 X 3
-            trans2joint = self.data_dict[index]['trans2joint'] # 3 
+        rest_human_offsets = self.data_dict[index]['rest_offsets'] # 22 X 3/24 X 3
+        trans2joint = self.data_dict[index]['trans2joint'] # 3 
 
-            obj_trans = self.data_dict[index]['obj_trans'][:, :, 0] # T X 3
-            obj_rot = self.data_dict[index]['obj_rot'] # T X 3 X 3 
+        obj_trans = self.data_dict[index]['obj_trans'][:, :, 0] # T X 3
+        obj_rot = self.data_dict[index]['obj_rot'] # T X 3 X 3 
 
-            obj_scale = self.data_dict[index]['obj_scale'] # T  
+        obj_scale = self.data_dict[index]['obj_scale'] # T  
 
-            obj_com_pos = self.data_dict[index]['obj_com_pos'] # T X 3 
+        obj_com_pos = self.data_dict[index]['obj_com_pos'] # T X 3 
 
-            object_name = seq_name.split("_")[1]
-            if object_name in ["mop", "vacuum"]:
-                obj_bottom_trans = self.data_dict[index]['obj_bottom_trans'][:, :, 0] # T X 3 
-                obj_bottom_rot = self.data_dict[index]['obj_bottom_rot'] # T X 3 X 3  
+        object_name = seq_name.split("_")[1]
+        if object_name in ["mop", "vacuum"]:
+            obj_bottom_trans = self.data_dict[index]['obj_bottom_trans'][:, :, 0] # T X 3 
+            obj_bottom_rot = self.data_dict[index]['obj_bottom_rot'] # T X 3 X 3  
 
-                obj_bottom_scale = self.data_dict[index]['obj_bottom_scale'] # T 
-           
-            num_steps = seq_root_trans.shape[0]
-            for start_t_idx in range(0, num_steps, self.window//2):
-                end_t_idx = start_t_idx + self.window - 1
-                if end_t_idx >= num_steps:
-                    end_t_idx = num_steps 
+            obj_bottom_scale = self.data_dict[index]['obj_bottom_scale'] # T 
+        
+        num_steps = seq_root_trans.shape[0] # 整个seq的length
 
-                # Skip the segment that has a length < 30 
-                if end_t_idx - start_t_idx < 30:
-                    continue 
+        self.window_data_dict[s_idx] = {}
+        
+        # Canonicalize the first frame's orientation. 
+        joint_aa_rep = torch.cat((torch.from_numpy(seq_root_orient).float()[:, None, :], \
+            torch.from_numpy(seq_pose_body).float()), dim=1) # T X J X 3 
+        X = torch.from_numpy(rest_human_offsets).float()[None].repeat(joint_aa_rep.shape[0], 1, 1).detach().cpu().numpy() # T X J X 3 
+        X[:, 0, :] = seq_root_trans 
+        local_rot_mat = transforms.axis_angle_to_matrix(joint_aa_rep) # T X J X 3 X 3 
+        Q = transforms.matrix_to_quaternion(local_rot_mat).detach().cpu().numpy() # T X J X 4 
 
-                self.window_data_dict[s_idx] = {}
-                
-                # Canonicalize the first frame's orientation. 
-                joint_aa_rep = torch.cat((torch.from_numpy(seq_root_orient[start_t_idx:end_t_idx+1]).float()[:, None, :], \
-                    torch.from_numpy(seq_pose_body[start_t_idx:end_t_idx+1]).float()), dim=1) # T X J X 3 ，这个其实就类似于smpl的pose参数，后面给到了Q上
-                X = torch.from_numpy(rest_human_offsets).float()[None].repeat(joint_aa_rep.shape[0], 1, 1).detach().cpu().numpy() # T X J X 3 
-                X[:, 0, :] = seq_root_trans[start_t_idx:end_t_idx+1] # 这个乍一看如果是相对于父节点的位移的话，应该是一个静止的样子
-                local_rot_mat = transforms.axis_angle_to_matrix(joint_aa_rep) # T X J X 3 X 3 
-                Q = transforms.matrix_to_quaternion(local_rot_mat).detach().cpu().numpy() # T X J X 4 
+        obj_x = obj_trans.copy() # T X 3 
+        obj_rot_mat = torch.from_numpy(obj_rot).float()# T X 3 X 3 
+        obj_q = transforms.matrix_to_quaternion(obj_rot_mat).detach().cpu().numpy() # T X 4 
 
-                obj_x = obj_trans[start_t_idx:end_t_idx+1].copy() # T X 3 
-                obj_rot_mat = torch.from_numpy(obj_rot[start_t_idx:end_t_idx+1]).float()# T X 3 X 3 
-                obj_q = transforms.matrix_to_quaternion(obj_rot_mat).detach().cpu().numpy() # T X 4 
+        curr_obj_scale = torch.from_numpy(obj_scale).float() # T
 
-                curr_obj_scale = torch.from_numpy(obj_scale[start_t_idx:end_t_idx+1]).float() # T
+        if object_name in ["mop", "vacuum"]:
+            obj_bottom_x = obj_bottom_trans.copy() # T X 3 
+            obj_bottom_rot_mat = torch.from_numpy(obj_bottom_rot).float() # T X 3 X 3 
+            obj_bottom_q = transforms.matrix_to_quaternion(obj_bottom_rot_mat).detach().cpu().numpy() # T X 4 
 
-                if object_name in ["mop", "vacuum"]:
-                    obj_bottom_x = obj_bottom_trans[start_t_idx:end_t_idx+1].copy() # T X 3 
-                    obj_bottom_rot_mat = torch.from_numpy(obj_bottom_rot[start_t_idx:end_t_idx+1]).float() # T X 3 X 3 
-                    obj_bottom_q = transforms.matrix_to_quaternion(obj_bottom_rot_mat).detach().cpu().numpy() # T X 4 
+            curr_obj_bottom_scale = torch.from_numpy(obj_bottom_scale).float() # T
 
-                    curr_obj_bottom_scale = torch.from_numpy(obj_bottom_scale[start_t_idx:end_t_idx+1]).float() # T
+            _, _, new_obj_bottom_x, new_obj_bottom_q = rotate_at_frame_w_obj(X[np.newaxis], Q[np.newaxis], \
+            obj_bottom_x[np.newaxis], obj_bottom_q[np.newaxis], \
+            trans2joint[np.newaxis], self.parents, n_past=1, floor_z=True)
+            # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
 
-                    _, _, new_obj_bottom_x, new_obj_bottom_q = rotate_at_frame_w_obj(X[np.newaxis], Q[np.newaxis], \
-                    obj_bottom_x[np.newaxis], obj_bottom_q[np.newaxis], \
-                    trans2joint[np.newaxis], self.parents, n_past=1, floor_z=True)
-                    # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
+        _, _, new_obj_x, new_obj_q = rotate_at_frame_w_obj(X[np.newaxis], Q[np.newaxis], \
+        obj_x[np.newaxis], obj_q[np.newaxis], \
+        trans2joint[np.newaxis], self.parents, n_past=1, floor_z=True)
+        # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
 
-                _, _, new_obj_x, new_obj_q = rotate_at_frame_w_obj(X[np.newaxis], Q[np.newaxis], \
-                obj_x[np.newaxis], obj_q[np.newaxis], \
-                trans2joint[np.newaxis], self.parents, n_past=1, floor_z=True)
-                # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
+        window_obj_com_pos = obj_com_pos.copy() # T X 3 
+    
+        X, Q, new_obj_com_pos, _ = rotate_at_frame_w_obj(X[np.newaxis], Q[np.newaxis], \
+        window_obj_com_pos[np.newaxis], obj_q[np.newaxis], \
+        trans2joint[np.newaxis], self.parents, n_past=1, floor_z=True)
+        # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
 
-                window_obj_com_pos = obj_com_pos[start_t_idx:end_t_idx+1].copy() # T X 3 
-            
-                X, Q, new_obj_com_pos, _ = rotate_at_frame_w_obj(X[np.newaxis], Q[np.newaxis], \
-                window_obj_com_pos[np.newaxis], obj_q[np.newaxis], \
-                trans2joint[np.newaxis], self.parents, n_past=1, floor_z=True)
-                # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
+        new_seq_root_trans = X[0, :, 0, :] # T X 3 
+        new_local_rot_mat = transforms.quaternion_to_matrix(torch.from_numpy(Q[0]).float()) # T X J X 3 X 3 
+        new_local_aa_rep = transforms.matrix_to_axis_angle(new_local_rot_mat) # T X J X 3 
+        new_seq_root_orient = new_local_aa_rep[:, 0, :] # T X 3
+        new_seq_pose_body = new_local_aa_rep[:, 1:, :] # T X 21 X 3 
+        
+        new_obj_rot_mat = transforms.quaternion_to_matrix(torch.from_numpy(new_obj_q[0]).float()) # T X 3 X 3 \
+        
+        cano_obj_mat = torch.matmul(new_obj_rot_mat[0], obj_rot_mat[0].transpose(0, 1)) # 3 X 3 
+        
+        if object_name in ["mop", "vacuum"]:
+            new_obj_bottom_rot_mat = transforms.quaternion_to_matrix(torch.from_numpy(new_obj_bottom_q[0]).float()) # T X 3 X 3 
 
-                new_seq_root_trans = X[0, :, 0, :] # T X 3 ，X的目的就是得到根节点的转换的，其他根本就不重要
-                new_local_rot_mat = transforms.quaternion_to_matrix(torch.from_numpy(Q[0]).float()) # T X J X 3 X 3 
-                new_local_aa_rep = transforms.matrix_to_axis_angle(new_local_rot_mat) # T X J X 3 
-                new_seq_root_orient = new_local_aa_rep[:, 0, :] # T X 3
-                new_seq_pose_body = new_local_aa_rep[:, 1:, :] # T X 21 X 3 
-                
-                new_obj_rot_mat = transforms.quaternion_to_matrix(torch.from_numpy(new_obj_q[0]).float()) # T X 3 X 3 \
-                
-                cano_obj_mat = torch.matmul(new_obj_rot_mat[0], obj_rot_mat[0].transpose(0, 1)) # 3 X 3 
-                
-                if object_name in ["mop", "vacuum"]:
-                    new_obj_bottom_rot_mat = transforms.quaternion_to_matrix(torch.from_numpy(new_obj_bottom_q[0]).float()) # T X 3 X 3 
+            obj_verts, tmp_obj_faces = self.load_object_geometry(object_name, curr_obj_scale.detach().cpu().numpy(), \
+                    new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy(), \
+                    curr_obj_bottom_scale.detach().cpu().numpy(), new_obj_bottom_x[0], \
+                    new_obj_bottom_rot_mat.detach().cpu().numpy()) # T X Nv X 3, tensor
 
-                    obj_verts, tmp_obj_faces = self.load_object_geometry(object_name, curr_obj_scale.detach().cpu().numpy(), \
-                            new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy(), \
-                            curr_obj_bottom_scale.detach().cpu().numpy(), new_obj_bottom_x[0], \
-                            new_obj_bottom_rot_mat.detach().cpu().numpy()) # T X Nv X 3, tensor
+            center_verts = obj_verts.mean(dim=1) # T X 3 
 
-                    center_verts = obj_verts.mean(dim=1) # T X 3 
+            query = self.process_window_data(rest_human_offsets, trans2joint, \
+                new_seq_root_trans, new_seq_root_orient.detach().cpu().numpy(), \
+                new_seq_pose_body.detach().cpu().numpy(), \
+                new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy(), \
+                curr_obj_scale.detach().cpu().numpy(), new_obj_com_pos[0], center_verts, \
+                new_obj_bottom_x[0], new_obj_bottom_rot_mat.detach().cpu().numpy(), \
+                curr_obj_bottom_scale.detach().cpu().numpy())
+        else:
+            obj_verts, tmp_obj_faces = self.load_object_geometry(object_name, curr_obj_scale.detach().cpu().numpy(), \
+                    new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy()) # T X Nv X 3, tensor
 
-                    query = self.process_window_data(rest_human_offsets, trans2joint, \
-                        new_seq_root_trans, new_seq_root_orient.detach().cpu().numpy(), \
-                        new_seq_pose_body.detach().cpu().numpy(), \
-                        new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy(), \
-                        curr_obj_scale.detach().cpu().numpy(), new_obj_com_pos[0], center_verts, \
-                        new_obj_bottom_x[0], new_obj_bottom_rot_mat.detach().cpu().numpy(), \
-                        curr_obj_bottom_scale.detach().cpu().numpy())
-                else:
-                    obj_verts, tmp_obj_faces = self.load_object_geometry(object_name, curr_obj_scale.detach().cpu().numpy(), \
-                            new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy()) # T X Nv X 3, tensor
+            center_verts = obj_verts.mean(dim=1) # T X 3 
 
-                    center_verts = obj_verts.mean(dim=1) # T X 3 
+            query = self.process_window_data(rest_human_offsets, trans2joint, \
+                new_seq_root_trans, new_seq_root_orient.detach().cpu().numpy(), \
+                new_seq_pose_body.detach().cpu().numpy(),  \
+                new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy(), \
+                curr_obj_scale.detach().cpu().numpy(), new_obj_com_pos[0], center_verts)
 
-                    query = self.process_window_data(rest_human_offsets, trans2joint, \
-                        new_seq_root_trans, new_seq_root_orient.detach().cpu().numpy(), \
-                        new_seq_pose_body.detach().cpu().numpy(),  \
-                        new_obj_x[0], new_obj_rot_mat.detach().cpu().numpy(), \
-                        curr_obj_scale.detach().cpu().numpy(), new_obj_com_pos[0], center_verts)
+        self.window_data_dict[s_idx]['cano_obj_mat'] = cano_obj_mat.detach().cpu().numpy() # 这个其实就是第一帧物体的旋转
 
-                # Compute BPS representation for this window
-                # Save to numpy file 
-                dest_obj_bps_npy_path = os.path.join(self.dest_obj_bps_npy_folder, seq_name+"_"+str(s_idx)+".npy")
+        curr_global_jpos = query['global_jpos'].detach().cpu().numpy()
+        curr_global_jvel = query['global_jvel'].detach().cpu().numpy()
+        curr_global_rot_6d = query['global_rot_6d'].detach().cpu().numpy()
+        
+        self.window_data_dict[s_idx]['motion'] = np.concatenate((curr_global_jpos.reshape(-1, 24*3), \
+        curr_global_jvel.reshape(-1, 24*3), curr_global_rot_6d.reshape(-1, 22*6)), axis=1) # T X (24*3+24*3+22*6)
 
-                if not os.path.exists(dest_obj_bps_npy_path):
-                    object_bps = self.compute_object_geo_bps(obj_verts, center_verts)
-                    np.save(dest_obj_bps_npy_path, object_bps.data.cpu().numpy())
+        self.window_data_dict[s_idx]['human_motion'] = query['human_motion']
+        
+        self.window_data_dict[s_idx]['seq_name'] = seq_name
 
-                self.window_data_dict[s_idx]['cano_obj_mat'] = cano_obj_mat.detach().cpu().numpy() 
+        self.window_data_dict[s_idx]['betas'] = betas 
+        self.window_data_dict[s_idx]['gender'] = gender
 
-                curr_global_jpos = query['global_jpos'].detach().cpu().numpy()
-                curr_global_jvel = query['global_jvel'].detach().cpu().numpy()
-                curr_global_rot_6d = query['global_rot_6d'].detach().cpu().numpy()
-              
-                self.window_data_dict[s_idx]['motion'] = np.concatenate((curr_global_jpos.reshape(-1, 24*3), \
-                curr_global_jvel.reshape(-1, 24*3), curr_global_rot_6d.reshape(-1, 22*6)), axis=1) # T X (24*3+24*3+22*6)
+        self.window_data_dict[s_idx]['trans2joint'] = trans2joint 
 
-                self.window_data_dict[s_idx]['seq_name'] = seq_name
-                self.window_data_dict[s_idx]['start_t_idx'] = start_t_idx
-                self.window_data_dict[s_idx]['end_t_idx'] = end_t_idx 
+        self.window_data_dict[s_idx]['obj_trans'] = query['obj_trans'].detach().cpu().numpy()
+        self.window_data_dict[s_idx]['obj_rot_mat'] = query['obj_rot_mat'].detach().cpu().numpy()
+        self.window_data_dict[s_idx]['obj_scale'] = query['obj_scale'].detach().cpu().numpy()
 
-                self.window_data_dict[s_idx]['betas'] = betas 
-                self.window_data_dict[s_idx]['gender'] = gender
+        self.window_data_dict[s_idx]['obj_com_pos'] = query['obj_com_pos'].detach().cpu().numpy()  
+        self.window_data_dict[s_idx]['window_obj_com_pos'] = query['window_obj_com_pos'].detach().cpu().numpy() 
 
-                self.window_data_dict[s_idx]['trans2joint'] = trans2joint 
+        if object_name in ["mop", "vacuum"]:
+            self.window_data_dict[s_idx]['obj_bottom_trans'] = query['obj_bottom_trans'].detach().cpu().numpy()
+            self.window_data_dict[s_idx]['obj_bottom_rot_mat'] = query['obj_bottom_rot_mat'].detach().cpu().numpy()
+            self.window_data_dict[s_idx]['obj_bottom_scale'] = query['obj_bottom_scale'].detach().cpu().numpy()
 
-                self.window_data_dict[s_idx]['obj_trans'] = query['obj_trans'].detach().cpu().numpy()
-                self.window_data_dict[s_idx]['obj_rot_mat'] = query['obj_rot_mat'].detach().cpu().numpy()
-                self.window_data_dict[s_idx]['obj_scale'] = query['obj_scale'].detach().cpu().numpy()
-
-                self.window_data_dict[s_idx]['obj_com_pos'] = query['obj_com_pos'].detach().cpu().numpy()  
-                self.window_data_dict[s_idx]['window_obj_com_pos'] = query['window_obj_com_pos'].detach().cpu().numpy() 
-
-                if object_name in ["mop", "vacuum"]:
-                    self.window_data_dict[s_idx]['obj_bottom_trans'] = query['obj_bottom_trans'].detach().cpu().numpy()
-                    self.window_data_dict[s_idx]['obj_bottom_rot_mat'] = query['obj_bottom_rot_mat'].detach().cpu().numpy()
-                    self.window_data_dict[s_idx]['obj_bottom_scale'] = query['obj_bottom_scale'].detach().cpu().numpy()
-
-                s_idx += 1 
-
-            # break 
+        # save self.window_data_dict as pickle file
+        # save_path = os.path.join(self.data_root_folder, "all_motion_train.pkl")
+        # with open(save_path, 'wb') as f:
+        #     pickle.dump(self.window_data_dict, f)
+         
        
     def extract_min_max_mean_std_from_data(self):
         all_global_jpos_data = []
@@ -705,10 +604,10 @@ class HandFootManipDataset(Dataset):
         window_center_verts = center_verts[random_t_idx:end_t_idx+1].to(window_obj_com_pos.device)
 
         move_to_zero_trans = window_root_trans[0:1, :].clone() # 1 X 3 
-        move_to_zero_trans[:, 2] = 0 
+        move_to_zero_trans[:, 2] = 0  # z令成0了会沉到地板下面去 
 
         # Move motion and object translation to make the initial pose trans 0. 
-        window_root_trans = window_root_trans - move_to_zero_trans 
+        window_root_trans = window_root_trans - move_to_zero_trans # (T, 3) 感觉这个是第一个能保存的 root平移
         window_obj_trans = window_obj_trans - move_to_zero_trans 
         window_obj_com_pos = window_obj_com_pos - move_to_zero_trans 
         window_center_verts = window_center_verts - move_to_zero_trans 
@@ -726,12 +625,21 @@ class HandFootManipDataset(Dataset):
         global_joint_rot_quat = transforms.matrix_to_quaternion(global_joint_rot_mat) # T' X 22 X 4 
 
         curr_seq_pose_aa = torch.cat((window_root_orient[:, None, :], window_pose_body), dim=1) # T' X 22 X 3/T' X 24 X 3 
-        rest_human_offsets = torch.from_numpy(rest_human_offsets).float()[None] 
+        rest_human_offsets = torch.from_numpy(rest_human_offsets).float()[None]     # (1, 24, 3)
         curr_seq_local_jpos = rest_human_offsets.repeat(curr_seq_pose_aa.shape[0], 1, 1).cuda() # T' X 22 X 3/T' X 24 X 3  
         curr_seq_local_jpos[:, 0, :] = window_root_trans - torch.from_numpy(trans2joint).cuda()[None] # T' X 22/24 X 3 
 
+        # 直接保存下来人体的smplh参数
+        human_motion={
+            'h_trans': window_root_trans.detach().cpu().numpy(),
+            'h_pose': transforms.matrix_to_axis_angle(local_joint_rot_mat).detach().cpu().numpy(),
+        }
+        # save_human_motion_path = os.path.join(self.data_root_folder, "human_motion.npz")
+        # np.savez(save_human_motion_path, **human_motion)
+
+
         local_joint_rot_mat = transforms.axis_angle_to_matrix(curr_seq_pose_aa)
-        _, human_jnts = quat_fk_torch(local_joint_rot_mat, curr_seq_local_jpos, use_joints24=True)  # smplh也能实现类似的功能
+        _, human_jnts = quat_fk_torch(local_joint_rot_mat, curr_seq_local_jpos, use_joints24=True)
 
         global_jpos = human_jnts # T' X 22/24 X 3 
         global_jvel = global_jpos[1:] - global_jpos[:-1] # (T'-1) X 22/24 X 3 
@@ -742,6 +650,7 @@ class HandFootManipDataset(Dataset):
         global_rot_6d = transforms.matrix_to_rotation_6d(global_joint_rot_mat)
 
         query = {}
+        query['human_motion'] = human_motion
 
         query['local_rot_mat'] = local_joint_rot_mat # T' X 22 X 3 X 3 
         query['local_rot_6d'] = local_rot_6d # T' X 22 X 6
@@ -768,7 +677,7 @@ class HandFootManipDataset(Dataset):
 
             query['obj_bottom_scale'] = window_obj_bottom_scale # T'
 
-        return query 
+        return query
 
     def __len__(self):
         return len(self.window_data_dict)
@@ -884,3 +793,17 @@ class HandFootManipDataset(Dataset):
         return data_input_dict 
         # data_input_dict['motion']: T X (22*3+22*6) range [-1, 1]
         # data_input_dict['obj_bps]: T X N X 3 
+
+if __name__=="__main__":
+    data_root_folder=Path("/home/guoling/HOIs/all_datasets/OMOMO/data")
+    Hfootdataset=HandFootManipDataset(data_root_folder=data_root_folder)
+
+    # print(len(Hfootdataset.data_dict))
+    for index in tqdm(range(len(Hfootdataset.data_dict)), desc="Processing data"):
+        Hfootdataset.cal_normalize_data_input(index_idx=index)
+
+    # save self.window_data_dict as pickle file
+    save_path = data_root_folder.parent / "data_diy/all_motion_test.pkl"
+    with open(save_path, 'wb') as f:
+        pickle.dump(Hfootdataset.window_data_dict, f)
+

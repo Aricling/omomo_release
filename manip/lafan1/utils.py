@@ -176,7 +176,7 @@ def rotate_at_frame_w_obj(X, Q, obj_x, obj_q, trans2joint_list, parents, n_past=
     # Get global quats and global poses (FK)
     global_q, global_x = quat_fk(Q, X, parents)
 
-    key_glob_Q = global_q[:, n_past - 1 : n_past, 0:1, :]  # (B, 1, 1, 4)
+    key_glob_Q = global_q[:, n_past - 1 : n_past, 0:1, :]  # (B, 1, 1, 4)，第一帧面朝的方向
     if floor_z: 
         # The floor is on z = xxx. Project the forward direction to xy plane. 
         forward = np.array([1, 1, 0])[np.newaxis, np.newaxis, np.newaxis, :] * quat_mul_vec(
